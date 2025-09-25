@@ -220,7 +220,7 @@ async function handleEvent(event) {
         const searchResult = await spotifyApi.searchTracks(query, { limit: 5 });
 
         if (searchResult.body.tracks.items.length === 0) {
-            const replyText = `Sorry, I couldn't find the song "${query}". Please try again.`;
+            const replyText = `Sorry, I couldn\'t find the song "${query}". Please try again.`;
             return lineClient.replyMessage(event.replyToken, { type: 'text', text: replyText });
         }
 

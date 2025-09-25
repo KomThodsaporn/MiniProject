@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Song Queue</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1><span class="live-dot"></span> Live Song Queue</h1>
+        <ul id="song-list">
+            <!-- Song items will be injected here by JavaScript -->
+        </ul>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const songList = document.getElementById('song-list');
+        const socket = io();
+
+        // Listen for 'update_queue' event from the server
+        socket.on('update_queue', (queue) => {
+            // Clear the current list
+            songList.innerHTML = '';
+
+            if (queue.length === 0) {
+                const li = document.createElement('li');
+                li.textContent = 'No songs in the queue...';
+                li.classList.add('empty');
+                songList.appendChild(li);
+            } else {
+                // Re-render the list
+                queue.forEach(song => {
+                    const li = document.createElement('li');
+                    
+                    const songDetails = document.createElement('div');
+                    songDetails.classList.add('song-details');
+                    
+                    const songName = document.createElement('span');
+                    songName.textContent = song.name;
+                    songName.classList.add('song-name');
+                    songDetails.appendChild(songName);
+
+                    const songArtist = document.createElement('span');
+                    songArtist.textContent = song.artist;
+                    songArtist.classList.add('song-artist');
+                    songDetails.appendChild(songArtist);
+                    
+                    li.appendChild(songDetails);
+
+                    const buttonGroup = document.createElement('div');
+                    buttonGroup.classList.add('button-group');
+
+                    // Played Button
+                    const playedButton = document.createElement('button');
+                    playedButton.textContent = 'Played';
+                    playedButton.classList.add('played-btn');
+                    playedButton.onclick = () => markAsPlayed(song.id);
+                    buttonGroup.appendChild(playedButton);
+
+                    // Delete Button
+                    const deleteButton = document.createElement('button');
+                    deleteButton.textContent = 'Remove';
+                    deleteButton.classList.add('remove-btn');
+                    deleteButton.onclick = () => deleteSong(song.id);
+                    buttonGroup.appendChild(deleteButton);
+
+                    li.appendChild(buttonGroup);
+
+                    songList.appendChild(li);
+                });
+            }
+        });
+
+        function markAsPlayed(songId) {
+            socket.emit('song_played', songId);
+        }
+
+        function deleteSong(songId) {
+            socket.emit('delete_song', songId);
+        }
+    </script>
+</body>
+</html>

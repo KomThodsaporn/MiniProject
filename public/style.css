@@ -1,0 +1,131 @@
+@import url('https://fonts.googleapis.com/css2?family=Kanit:wght@400;600&display=swap');
+
+body {
+    font-family: 'Kanit', sans-serif;
+    background-color: #121212;
+    color: #ffffff;
+    margin: 0;
+    padding: 20px;
+    font-size: 18px;
+}
+
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+    background-color: #1e1e1e;
+    border-radius: 10px;
+    padding: 20px 30px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+}
+
+h1 {
+    display: flex;
+    align-items: center;
+    font-size: 2.5em;
+    color: #1DB954;
+    border-bottom: 2px solid #282828;
+    padding-bottom: 15px;
+    margin-top: 0;
+}
+
+.live-dot {
+    height: 18px;
+    width: 18px;
+    background-color: #ff4141;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 15px;
+    animation: blinker 1.5s linear infinite;
+}
+
+@keyframes blinker {
+    50% {
+        opacity: 0.3;
+    }
+}
+
+ul {
+    list-style-type: none;
+    padding: 0;
+    margin: 0;
+}
+
+li {
+    background-color: #282828;
+    padding: 15px 20px;
+    margin-bottom: 10px;
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 1.4em;
+    transition: background-color 0.3s;
+}
+
+li:hover {
+    background-color: #333333;
+}
+
+li.empty {
+    justify-content: center;
+    color: #888;
+    font-style: italic;
+}
+
+li button {
+    background-color: #b91d1d;
+    color: white;
+    border: none;
+    padding: 8px 15px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-family: 'Kanit', sans-serif;
+    font-size: 0.8em;
+    transition: background-color 0.2s;
+}
+
+li button:hover {
+    background-color: #e02d2d;
+}
+
+li button.played-btn {
+    background-color: #1DB954;
+    margin-right: 8px;
+}
+
+li button.played-btn:hover {
+    background-color: #1ed760;
+}
+
+.song-details {
+    display: flex;
+    flex-direction: column;
+}
+
+.song-name {
+    font-size: 1em;
+    font-weight: 600;
+}
+
+.song-artist {
+    font-size: 0.8em;
+    color: #b3b3b3;
+}
+
+.button-group {
+    display: flex;
+    align-items: center;
+}
+
+.tag {
+    font-size: 0.7em;
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-left: 10px;
+    font-weight: 600;
+}
+
+.tag.duplicate {
+    background-color: #f0ad4e;
+    color: #121212;
+}
