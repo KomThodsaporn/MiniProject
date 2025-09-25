@@ -10,7 +10,7 @@
     <div class="container">
         <h1><span class="live-dot"></span> Live Song Queue</h1>
         <ul id="song-list">
-            <!-- Song items will be injected here by JavaScript -->
+            <!-- Song items will be injected here -->
         </ul>
     </div>
 
@@ -19,10 +19,8 @@
         const songList = document.getElementById('song-list');
         const socket = io();
 
-        // Listen for 'update_queue' event from the server
         socket.on('update_queue', (queue) => {
-            // Clear the current list
-            songList.innerHTML = '';
+            songList.innerHTML = ''; // Clear the list
 
             if (queue.length === 0) {
                 const li = document.createElement('li');
@@ -30,13 +28,12 @@
                 li.classList.add('empty');
                 songList.appendChild(li);
             } else {
-                // Re-render the list
                 queue.forEach(song => {
                     const li = document.createElement('li');
-                    
+
                     const songDetails = document.createElement('div');
                     songDetails.classList.add('song-details');
-                    
+
                     const songName = document.createElement('span');
                     songName.textContent = song.name;
                     songName.classList.add('song-name');
@@ -46,20 +43,26 @@
                     songArtist.textContent = song.artist;
                     songArtist.classList.add('song-artist');
                     songDetails.appendChild(songArtist);
+
+                    // *** NEW: Add a comment if the song was already played today ***
+                    if (song.wasPlayedToday) {
+                        const playedComment = document.createElement('span');
+                        playedComment.textContent = ' (Played Today)';
+                        playedComment.classList.add('played-today-comment');
+                        songArtist.appendChild(playedComment); // Append it next to the artist
+                    }
                     
                     li.appendChild(songDetails);
 
                     const buttonGroup = document.createElement('div');
                     buttonGroup.classList.add('button-group');
 
-                    // Played Button
                     const playedButton = document.createElement('button');
                     playedButton.textContent = 'Played';
                     playedButton.classList.add('played-btn');
                     playedButton.onclick = () => markAsPlayed(song.id);
                     buttonGroup.appendChild(playedButton);
 
-                    // Delete Button
                     const deleteButton = document.createElement('button');
                     deleteButton.textContent = 'Remove';
                     deleteButton.classList.add('remove-btn');
@@ -67,7 +70,6 @@
                     buttonGroup.appendChild(deleteButton);
 
                     li.appendChild(buttonGroup);
-
                     songList.appendChild(li);
                 });
             }

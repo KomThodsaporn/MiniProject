@@ -117,15 +117,10 @@ li button.played-btn:hover {
     align-items: center;
 }
 
-.tag {
-    font-size: 0.7em;
-    padding: 4px 8px;
-    border-radius: 4px;
-    margin-left: 10px;
-    font-weight: 600;
-}
-
-.tag.duplicate {
-    background-color: #f0ad4e;
-    color: #121212;
+/* --- Style for the new comment --- */
+.played-today-comment {
+    color: #f0ad4e; /* Warning-like color */
+    font-style: italic;
+    font-size: 0.9em; /* Slightly smaller */
+    margin-left: 8px;
 }
