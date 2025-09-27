@@ -20,7 +20,8 @@ const spotifyApi = new SpotifyWebApi({
     clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
 });
 
-const PORT = process.env.PORT || 8080;
+const argPortIndex = process.argv.indexOf('--port');
+const PORT = argPortIndex !== -1 ? process.argv[argPortIndex + 1] : process.env.PORT || 3000;
 
 // --- Application State (In-Memory) ---
 let songQueue = []; // Current queue
