@@ -177,6 +177,9 @@ async function handleEvent(event) {
                 return lineClient.replyMessage(event.replyToken, { type: 'text', text: 'This confirmation has expired.' });
             }
             delete activeConfirmations[userId]; // ลบการยืนยันที่ใช้แล้ว
+            
+            const profile = await lineClient.getProfile(userId);
+            const userName = profile.displayName;
 
             // ตรวจสอบว่าเพลงซ้ำในคิวหรือไม่
             const isDuplicateInQueue = songQueue.some(song => song.name === songData.name && song.artist === songData.artist);
@@ -190,11 +193,12 @@ async function handleEvent(event) {
                 name: songData.name,
                 artist: songData.artist,
                 albumArt: songData.albumArt,
-                wasPlayedToday: songData.wasPlayedToday, // เก็บสถานะว่าเคยเล่นวันนี้หรือไม่
+                wasPlayedToday: songData.wasPlayedToday,
+                userName: userName,
             };
 
             songQueue.push(newSong); // เพิ่มเพลงใหม่เข้าคิว
-            console.log(`Added to queue: ${newSong.name} (Played today: ${newSong.wasPlayedToday})`);
+            console.log(`Added to queue: ${newSong.name} (Played today: ${newSong.wasPlayedToday}) by ${newSong.userName}`);
             io.emit('update_queue', songQueue); // ส่งอัปเดตคิวไปยังหน้าจอแสดงผล
 
             const replyText = `"${newSong.name}" by ${newSong.artist} has been added to the queue!`;
@@ -299,6 +303,7 @@ io.on('connection', (socket) => {
                     Timestamp: new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }),
                     'Song Name': playedSong.name,
                     Artist: playedSong.artist,
+                    'Requested By': playedSong.userName,
                 });
                 console.log(`Logged played song to Google Sheet: ${playedSong.name}`);
                 songQueue = songQueue.filter(song => song.id !== songId); // ลบเพลงออกจากคิว
