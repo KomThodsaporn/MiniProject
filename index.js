@@ -8,6 +8,7 @@ const { Server } = require("socket.io");
 const line = require('@line/bot-sdk');
 const { v4: uuidv4 } = require('uuid');
 const SpotifyWebApi = require('spotify-web-api-node');
+const { google } = require('googleapis');
 
 // --- Configuration ---
 const lineConfig = {
@@ -20,6 +21,7 @@ const spotifyApi = new SpotifyWebApi({
     clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
 });
 
+const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID_HERE'; // <-- IMPORTANT: REPLACE THIS
 const argPortIndex = process.argv.indexOf('--port');
 const PORT = argPortIndex !== -1 ? process.argv[argPortIndex + 1] : process.env.PORT || 3000;
 
@@ -51,6 +53,39 @@ function scheduleDailyReset() {
 // Check if a song was played today (from in-memory list)
 function hasBeenPlayedToday(songName, artistName) {
     return playedToday.some(song => song.name === songName && song.artist === artistName);
+}
+
+// --- Google Sheets Integration ---
+async function updateGoogleSheet(song) {
+    try {
+        const auth = new google.auth.GoogleAuth({
+            keyFile: 'credentials.json', // Path to your service account key
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+
+        const sheets = google.sheets({ version: 'v4', auth });
+
+        // Data to be appended
+        const resource = {
+            values: [[
+                new Date().toISOString(), // Timestamp
+                song.name,
+                song.artist,
+                song.userName,
+            ]],
+        };
+
+        const response = await sheets.spreadsheets.values.append({
+            spreadsheetId: SPREADSHEET_ID,
+            range: 'Sheet1!A1', // Target the first cell of "Sheet1"
+            valueInputOption: 'USER_ENTERED',
+            resource,
+        });
+
+        console.log('Appended to Google Sheet:', response.data);
+    } catch (err) {
+        console.error('Error updating Google Sheet:', err);
+    }
 }
 
 
@@ -145,7 +180,7 @@ async function handleEvent(event) {
             // Check for duplicates in the current queue
             const isDuplicateInQueue = songQueue.some(song => song.name === songData.name && song.artist === songData.artist);
             if (isDuplicateInQueue) {
-                const replyText = `"${songData.name}" is already in the queue.`;
+                const replyText = `\"${songData.name}\" is already in the queue.`;
                 return lineClient.replyMessage(event.replyToken, { type: 'text', text: replyText });
             }
 
@@ -162,7 +197,7 @@ async function handleEvent(event) {
             console.log(`Added to queue: ${newSong.name} by ${newSong.userName}`);
             io.emit('update_queue', songQueue); // Notify web clients
 
-            const replyText = `"${newSong.name}" by ${newSong.artist} has been added to the queue!`;
+            const replyText = `\"${newSong.name}\" by ${newSong.artist} has been added to the queue!`;
             return lineClient.replyMessage(event.replyToken, { type: 'text', text: replyText });
 
         } catch (err) {
@@ -264,6 +299,9 @@ io.on('connection', (socket) => {
             songHistory.push(playedSong);
             playedToday.push(playedSong);
             console.log(`Logged played song to memory: ${playedSong.name}`);
+
+            // *** NEW: Update Google Sheet ***
+            updateGoogleSheet(playedSong);
 
             // Remove from queue
             songQueue = songQueue.filter(song => song.id !== songId);
