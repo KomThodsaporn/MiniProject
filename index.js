@@ -1,99 +1,83 @@
 'use strict';
 
 // --- การนำเข้าไลบรารีและโมดูลต่างๆ ---
-require('dotenv').config(); // โหลดค่าจากไฟล์ .env เข้าสู่ process.env
-const express = require('express'); // framework หลักสำหรับสร้างเว็บเซิร์ฟเวอร์
-const http = require('http'); // โมดูลสำหรับสร้าง HTTP server
-const { Server } = require("socket.io"); // ไลบรารีสำหรับ Real-time communication (WebSockets)
-const line = require('@line/bot-sdk'); // SDK สำหรับเชื่อมต่อกับ LINE Messaging API
-const { v4: uuidv4 } = require('uuid'); // ไลบรารีสำหรับสร้าง unique IDs
-const SpotifyWebApi = require('spotify-web-api-node'); // SDK สำหรับเชื่อมต่อกับ Spotify Web API
-const { GoogleSpreadsheet } = require('google-spreadsheet'); // ไลบรารีสำหรับทำงานกับ Google Sheets
-const { JWT } = require('google-auth-library'); // ไลบรารีสำหรับ Google Authentication
-const stringSimilarity = require('string-similarity'); // ไลบรารีสำหรับเปรียบเทียบความคล้ายของข้อความ
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const { Server } = require("socket.io");
+const line = require('@line/bot-sdk');
+const { v4: uuidv4 } = require('uuid');
+const SpotifyWebApi = require('spotify-web-api-node');
+const mongoose = require('mongoose');
+const Song = require('./models/Song'); // <-- นำเข้า Song Model
 
 // --- การตั้งค่า (Configuration) ---
-// ตั้งค่าสำหรับ LINE Bot
 const lineConfig = {
-    channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN, // Token สำหรับเข้าถึง Channel
-    channelSecret: process.env.CHANNEL_SECRET, // Secret สำหรับ Channel
+    channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+    channelSecret: process.env.CHANNEL_SECRET,
 };
 
-// ตั้งค่าสำหรับ Spotify API
 const spotifyApi = new SpotifyWebApi({
-    clientId: process.env.SPOTIFY_CLIENT_ID, // Client ID ของ Spotify App
-    clientSecret: process.env.SPOTIFY_CLIENT_SECRET, // Client Secret ของ Spotify App
+    clientId: process.env.SPOTIFY_CLIENT_ID,
+    clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
 });
 
-const PORT = parseInt(process.env.PORT) || process.argv[3] || 8080; // พอร์ตที่เซิร์ฟเวอร์จะรัน
-const SHEET_ID = process.env.GOOGLE_SHEET_ID; // ID ของ Google Sheet ที่จะใช้
+const PORT = process.env.PORT || 8080;
+const MONGODB_URI = process.env.MONGODB_URI; // <-- URI สำหรับเชื่อมต่อ MongoDB
 
-// --- การตั้งค่า Google Sheet ---
-// สร้าง JWT client สำหรับยืนยันตัวตนกับ Google
-const serviceAccountAuth = new JWT({
-    email: require('./credentials.json').client_email, // อีเมลของ Service Account
-    key: require('./credentials.json').private_key, // Private key ของ Service Account
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'], // ขอบเขตการเข้าถึง (ขอสิทธิ์แก้ไข Spreadsheets)
-});
-
-const doc = new GoogleSpreadsheet(SHEET_ID, serviceAccountAuth); // สร้าง instance ของ Google Spreadsheet
-let sheet; // ตัวแปรสำหรับเก็บ Sheet ที่จะทำงานด้วย
-
-// ฟังก์ชันสำหรับเชื่อมต่อและโหลดข้อมูล Google Sheet
-async function initSheet() {
+// --- การเชื่อมต่อฐานข้อมูล MongoDB ---
+async function connectDB() {
+    if (!MONGODB_URI) {
+        console.error('Fatal Error: MONGODB_URI is not defined in .env file');
+        process.exit(1); // ออกจากโปรแกรมถ้าไม่มี URI
+    }
     try {
-        await doc.loadInfo(); // โหลดข้อมูลของ Spreadsheet
-        sheet = doc.sheetsByIndex[0]; // เลือก Sheet แรก
-        console.log(`Connected to Google Sheet: "${sheet.title}"`);
+        await mongoose.connect(MONGODB_URI);
+        console.log('Connected to MongoDB successfully!');
     } catch (err) {
-        console.error('Failed to connect to Google Sheet:', err);
+        console.error('Failed to connect to MongoDB:', err);
+        process.exit(1);
     }
 }
 
-// ฟังก์ชันสำหรับตรวจสอบว่าเพลงเคยถูกเล่นไปแล้วในวันนี้หรือไม่
+// --- ฟังก์ชันที่ทำงานกับฐานข้อมูล ---
+// ตรวจสอบว่าเพลงเคยถูกขอในวันนี้หรือไม่ (ฟังก์ชันใหม่ที่ใช้ MongoDB)
 async function hasBeenPlayedToday(songName, artistName) {
-    if (!sheet) {
-        console.log("Sheet not initialized, skipping duplicate check.");
-        return false;
-    }
     try {
-        const rows = await sheet.getRows(); // ดึงข้อมูลทุกแถวจาก Sheet
-        const bangkokTimezone = 'Asia/Bangkok';
-        const todayString = new Date().toLocaleDateString('en-US', { timeZone: bangkokTimezone });
+        // ตั้งเวลาเที่ยงคืนของวันนี้ในโซนเวลา กทม.
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        startOfDay.setHours(startOfDay.getHours() - 7); // ปรับเป็น UTC+0
 
-        for (const row of rows) {
-            const timestampStr = row.get('Timestamp');
-            if (timestampStr) {
-                const playedDateString = new Date(timestampStr).toLocaleDateString('en-US', { timeZone: bangkokTimezone });
-                if (playedDateString === todayString && row.get('Song Name') === songName && row.get('Artist') === artistName) {
-                    return true; // พบว่าเพลงนี้เล่นไปแล้ววันนี้
-                }
-            }
-        }
-        return false; // ไม่พบว่าเพลงนี้เล่นไปแล้ววันนี้
+        const song = await Song.findOne({
+            name: songName,
+            artist: artistName,
+            timestamp: { $gte: startOfDay }
+        });
+
+        return !!song; // คืนค่า true ถ้าเจอเพลง, false ถ้าไม่เจอ
     } catch (err) {
-        console.error("Error checking for played song in Google Sheet:", err);
-        return false;
+        console.error("Error checking for played song in MongoDB:", err);
+        return false; // กรณีมีข้อผิดพลาด ให้ถือว่ายังไม่เคยเล่น
     }
 }
 
 // --- State (สถานะของแอปพลิเคชัน) ---
-let songQueue = []; // คิวของเพลงที่รอเล่น
-const activeConfirmations = {}; // เก็บ ID การยืนยันที่ยังใช้งานได้ของผู้ใช้แต่ละคน
+let songQueue = []; // คิวเพลงที่รอเล่น (ยังคงใช้สำหรับหน้าจอ real-time)
+const activeConfirmations = {};
 
 // --- การ khởi tạo (Initialization) ---
-const app = express(); // สร้าง Express app
-const server = http.createServer(app); // สร้าง HTTP Server
-const io = new Server(server); // สร้าง Socket.IO Server
-const lineClient = new line.Client(lineConfig); // สร้าง LINE Bot client
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+const lineClient = new line.Client(lineConfig);
 
 // --- การยืนยันตัวตนกับ Spotify (Spotify Auth) ---
 function getSpotifyToken() {
     spotifyApi.clientCredentialsGrant().then(
         (data) => {
             console.log('The access token expires in ' + data.body['expires_in']);
-            spotifyApi.setAccessToken(data.body['access_token']); // ตั้งค่า Access Token
-            // ตั้งเวลาเพื่อขอ Token ใหม่ก่อนที่อันเก่าจะหมดอายุ
+            spotifyApi.setAccessToken(data.body['access_token']);
             setTimeout(getSpotifyToken, (data.body['expires_in'] - 60) * 1000);
         },
         (err) => console.error('Something went wrong when retrieving an access token', err)
@@ -101,46 +85,29 @@ function getSpotifyToken() {
 }
 
 // --- Middleware และ Routes ---
-app.use(express.static('public')); // ให้บริการไฟล์ static จากโฟลเดอร์ public
-app.get('/stats', (req, res) => res.sendFile(__dirname + '/public/stats.html')); // Route สำหรับหน้าสถิติ
+app.use(express.static('public'));
+app.get('/stats', (req, res) => res.sendFile(__dirname + '/public/stats.html'));
 
-// Route API สำหรับดึงข้อมูลสถิติเพลงและศิลปิน
+// Route API สำหรับดึงข้อมูลสถิติ (ฟังก์ชันใหม่ที่ใช้ MongoDB Aggregation)
 app.get('/api/stats', async (req, res) => {
     try {
-        if (!sheet) {
-            return res.status(500).json({ error: 'Sheet not initialized' });
-        }
-        const rows = await sheet.getRows();
+        // 20 เพลงที่ถูกขอบ่อยที่สุด
+        const mostRequestedSongs = await Song.aggregate([
+            { $group: { _id: { name: "$name", artist: "$artist" }, count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 20 },
+            { $project: { _id: 0, name: { $concat: ["$_id.name", " - ", "$_id.artist"] }, count: "$count" } }
+        ]);
 
-        const songCounts = {}; // เก็บจำนวนครั้งที่แต่ละเพลงถูกขอ
-        const artistCounts = {}; // เก็บจำนวนครั้งที่แต่ละศิลปินถูกขอ
-
-        rows.forEach(row => {
-            const songName = row.get('Song Name');
-            const artistName = row.get('Artist');
-
-            if (songName && artistName) {
-                const uniqueSongKey = `${songName} - ${artistName}`;
-                songCounts[uniqueSongKey] = (songCounts[uniqueSongKey] || 0) + 1;
-            }
-            if (artistName) {
-                const artists = artistName.split(', ');
-                artists.forEach(artist => {
-                    artistCounts[artist] = (artistCounts[artist] || 0) + 1;
-                });
-            }
-        });
-
-        // ฟังก์ชันสำหรับเรียงลำดับและตัดข้อมูล 20 อันดับแรก
-        const sortAndSlice = (counts) => {
-            return Object.entries(counts)
-                .map(([name, count]) => ({ name, count }))
-                .sort((a, b) => b.count - a.count) // เรียงจากมากไปน้อย
-                .slice(0, 20); // เอา 20 อันดับแรก
-        };
-
-        const mostRequestedSongs = sortAndSlice(songCounts);
-        const mostRequestedArtists = sortAndSlice(artistCounts);
+        // 20 ศิลปินที่ถูกขอบ่อยที่สุด
+        const mostRequestedArtists = await Song.aggregate([
+            { $project: { artists: { $split: ["$artist", ", "] } } },
+            { $unwind: "$artists" },
+            { $group: { _id: "$artists", count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 20 },
+            { $project: { _id: 0, name: "$_id", count: "$count" } }
+        ]);
 
         res.json({
             songs: mostRequestedSongs,
@@ -148,15 +115,14 @@ app.get('/api/stats', async (req, res) => {
         });
 
     } catch (err) {
-        console.error('Failed to get stats from Google Sheet:', err);
+        console.error('Failed to get stats from MongoDB:', err);
         res.status(500).json({ error: 'Failed to retrieve stats' });
     }
 });
 
-
 // --- Webhook หลักสำหรับ LINE Bot ---
 app.post('/webhook', line.middleware(lineConfig), (req, res) => {
-    Promise.all(req.body.events.map(handleEvent)) // ประมวลผลทุก Event ที่ได้รับ
+    Promise.all(req.body.events.map(handleEvent))
         .then(result => res.json(result))
         .catch(err => {
             console.error('Webhook Error:', err);
@@ -166,24 +132,21 @@ app.post('/webhook', line.middleware(lineConfig), (req, res) => {
 
 // --- ตัวจัดการ Event (Event Handler) ---
 async function handleEvent(event) {
-    const userId = event.source.userId; // ID ของผู้ใช้ที่ส่ง Event มา
+    const userId = event.source.userId;
 
-    // จัดการกรณีที่เป็น Postback Event (เช่น การกดปุ่ม "Yes")
     if (event.type === 'postback') {
         try {
             const postbackData = JSON.parse(event.postback.data);
             const { confirmationId, ...songData } = postbackData;
 
-            // ตรวจสอบว่าการยืนยันหมดอายุหรือยัง
             if (!activeConfirmations[userId] || activeConfirmations[userId] !== confirmationId) {
                 return lineClient.replyMessage(event.replyToken, { type: 'text', text: 'This confirmation has expired.' });
             }
-            delete activeConfirmations[userId]; // ลบการยืนยันที่ใช้แล้ว
-            
+            delete activeConfirmations[userId];
+
             const profile = await lineClient.getProfile(userId);
             const userName = profile.displayName;
 
-            // ตรวจสอบว่าเพลงซ้ำในคิวหรือไม่
             const isDuplicateInQueue = songQueue.some(song => song.name === songData.name && song.artist === songData.artist);
             if (isDuplicateInQueue) {
                 const replyText = `"${songData.name}" is already in the queue.`;
@@ -199,9 +162,9 @@ async function handleEvent(event) {
                 userName: userName,
             };
 
-            songQueue.push(newSong); // เพิ่มเพลงใหม่เข้าคิว
-            console.log(`Added to queue: ${newSong.name} (Played today: ${newSong.wasPlayedToday}) by ${newSong.userName}`);
-            io.emit('update_queue', songQueue); // ส่งอัปเดตคิวไปยังหน้าจอแสดงผล
+            songQueue.push(newSong);
+            console.log(`Added to queue: ${newSong.name} by ${newSong.userName}`);
+            io.emit('update_queue', songQueue);
 
             const replyText = `"${newSong.name}" by ${newSong.artist} has been added to the queue!`;
             return lineClient.replyMessage(event.replyToken, { type: 'text', text: replyText });
@@ -212,25 +175,22 @@ async function handleEvent(event) {
         }
     }
 
-    // ไม่ต้องทำอะไรถ้าไม่ใช่ข้อความ
     if (event.type !== 'message' || event.message.type !== 'text') {
         return Promise.resolve(null);
     }
 
-    const query = event.message.text.trim(); // ข้อความที่ผู้ใช้พิมพ์
+    const query = event.message.text.trim();
     if (!query) return Promise.resolve(null);
 
-    // กรณีผู้ใช้พิมพ์ "No" เพื่อค้นหาใหม่
     if (query.toLowerCase() === 'no, search again' || query.toLowerCase() === 'no') {
-        delete activeConfirmations[userId]; // ลบการยืนยันเก่า
+        delete activeConfirmations[userId];
         return lineClient.replyMessage(event.replyToken, { type: 'text', text: 'Got it. Please enter a new song name.' });
     }
 
     try {
-        // ค้นหาเพลงจาก Spotify
         const searchResult = await spotifyApi.searchTracks(query, { limit: 1 });
         if (searchResult.body.tracks.items.length === 0) {
-            return lineClient.replyMessage(event.replyToken, { type: 'text', text: `Sorry, I couldn't find "${query}".` });
+            return lineClient.replyMessage(event.replyToken, { type: 'text', text: `Sorry, I couldn\'t find "${query}".` });
         }
 
         const track = searchResult.body.tracks.items[0];
@@ -240,7 +200,6 @@ async function handleEvent(event) {
             albumArt: track.album.images[0]?.url || 'https://via.placeholder.com/150',
         };
 
-        // ตรวจสอบว่าเพลงเคยเล่นวันนี้หรือไม่ ก่อนส่งให้ผู้ใช้ยืนยัน
         const wasPlayed = await hasBeenPlayedToday(songData.name, songData.artist);
 
         let confirmationText = `Artist: ${songData.artist}`;
@@ -249,10 +208,9 @@ async function handleEvent(event) {
         }
 
         const confirmationId = uuidv4();
-        activeConfirmations[userId] = confirmationId; // เก็บ ID การยืนยัน
+        activeConfirmations[userId] = confirmationId;
         const postbackPayload = { ...songData, confirmationId, wasPlayedToday: wasPlayed };
 
-        // สร้างข้อความยืนยันพร้อมปุ่มกด
         const confirmationMessage = {
             type: 'template',
             altText: `Is this the correct song? ${songData.name}`,
@@ -267,7 +225,7 @@ async function handleEvent(event) {
                     {
                         type: 'postback',
                         label: 'Yes, add to queue',
-                        data: JSON.stringify(postbackPayload), // ข้อมูลที่จะส่งกลับมาตอนกดปุ่ม
+                        data: JSON.stringify(postbackPayload),
                         displayText: `Adding "${songData.name}"...`,
                     },
                     { type: 'message', label: 'No, search again', text: 'No, search again' },
@@ -275,7 +233,7 @@ async function handleEvent(event) {
             },
         };
 
-        return lineClient.replyMessage(event.replyToken, confirmationMessage); // ส่งข้อความยืนยันไปให้ผู้ใช้
+        return lineClient.replyMessage(event.replyToken, confirmationMessage);
 
     } catch (err) {
         console.error('Spotify API or LINE reply error:', err);
@@ -286,32 +244,34 @@ async function handleEvent(event) {
 // --- ตัวจัดการ Socket.IO ---
 io.on('connection', (socket) => {
     console.log('A user connected to the display.');
-    socket.emit('update_queue', songQueue); // ส่งคิวเพลงปัจจุบันไปให้ client ที่เชื่อมต่อเข้ามาใหม่
+    socket.emit('update_queue', songQueue);
 
-    // เมื่อมีการลบเพลงจากหน้าจอ
     socket.on('delete_song', (songId) => {
         songQueue = songQueue.filter(song => song.id !== songId);
         console.log(`Removed song with ID: ${songId}`);
-        io.emit('update_queue', songQueue); // อัปเดตคิวให้ทุก client
+        io.emit('update_queue', songQueue);
     });
 
-    // เมื่อมีการกดเล่นเพลงจากหน้าจอ
+    // เมื่อมีการกดเล่นเพลงจากหน้าจอ (ฟังก์ชันใหม่ที่บันทึกลง MongoDB)
     socket.on('song_played', async (songId) => {
         const playedSong = songQueue.find(song => song.id === songId);
-        if (playedSong && sheet) {
+        if (playedSong) {
             try {
-                // เพิ่มข้อมูลเพลงที่เล่นแล้วลงใน Google Sheet
-                await sheet.addRow({
-                    Timestamp: new Date().toLocaleString('en-US', { timeZone: 'Asia/Bangkok' }),
-                    'Song Name': playedSong.name,
-                    Artist: playedSong.artist,
-                    'Requested By': playedSong.userName,
+                // สร้าง Document ใหม่และบันทึกลง MongoDB
+                const songLog = new Song({
+                    name: playedSong.name,
+                    artist: playedSong.artist,
+                    albumArt: playedSong.albumArt,
+                    requestedBy: playedSong.userName,
                 });
-                console.log(`Logged played song to Google Sheet: ${playedSong.name}`);
-                songQueue = songQueue.filter(song => song.id !== songId); // ลบเพลงออกจากคิว
-                io.emit('update_queue', songQueue); // อัปเดตคิวให้ทุก client
+                await songLog.save();
+                console.log(`Logged played song to MongoDB: ${playedSong.name}`);
+
+                // ลบเพลงออกจากคิวหลังจากบันทึกแล้ว
+                songQueue = songQueue.filter(song => song.id !== songId);
+                io.emit('update_queue', songQueue);
             } catch (err) {
-                console.error('Error adding played song row:', err);
+                console.error('Error saving played song to MongoDB:', err);
             }
         }
     });
@@ -320,9 +280,14 @@ io.on('connection', (socket) => {
 });
 
 // --- การเริ่มทำงานของเซิร์ฟเวอร์ ---
-server.listen(PORT, () => {
-    console.log(`Server is listening on port ${PORT}`);
-    console.log('Open http://localhost:3000 in your browser.');
-    getSpotifyToken(); // ขอ Spotify token
-    initSheet(); // เชื่อมต่อ Google Sheet
-});
+async function startServer() {
+    await connectDB(); // <-- เชื่อมต่อฐานข้อมูลก่อนเปิดเซิร์ฟเวอร์
+
+    server.listen(PORT, () => {
+        console.log(`Server is listening on port ${PORT}`);
+        console.log('Open http://localhost:3000 in your browser.');
+        getSpotifyToken();
+    });
+}
+
+startServer(); // <-- เริ่มการทำงานของเซิร์ฟเวอร์
