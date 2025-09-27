@@ -119,8 +119,9 @@ app.get('/api/stats', async (req, res) => {
             const songName = row.get('Song Name');
             const artistName = row.get('Artist');
 
-            if (songName) {
-                songCounts[songName] = (songCounts[songName] || 0) + 1;
+            if (songName && artistName) {
+                const uniqueSongKey = `${songName} - ${artistName}`;
+                songCounts[uniqueSongKey] = (songCounts[uniqueSongKey] || 0) + 1;
             }
             if (artistName) {
                 const artists = artistName.split(', ');
@@ -138,8 +139,8 @@ app.get('/api/stats', async (req, res) => {
                 .slice(0, 20); // เอา 20 อันดับแรก
         };
 
-        const mostRequestedSongs = sortAndSlice(songCounts); // 20 เพลงที่ถูกขอบ่อยที่สุด
-        const mostRequestedArtists = sortAndSlice(artistCounts); // 20 ศิลปินที่ถูกขอบ่อยที่สุด
+        const mostRequestedSongs = sortAndSlice(songCounts);
+        const mostRequestedArtists = sortAndSlice(artistCounts);
 
         res.json({
             songs: mostRequestedSongs,
@@ -151,6 +152,7 @@ app.get('/api/stats', async (req, res) => {
         res.status(500).json({ error: 'Failed to retrieve stats' });
     }
 });
+
 
 // --- Webhook หลักสำหรับ LINE Bot ---
 app.post('/webhook', line.middleware(lineConfig), (req, res) => {
