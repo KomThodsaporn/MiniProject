@@ -21,7 +21,7 @@ const spotifyApi = new SpotifyWebApi({
     clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
 });
 
-const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID_HERE'; // <-- IMPORTANT: REPLACE THIS
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const argPortIndex = process.argv.indexOf('--port');
 const PORT = argPortIndex !== -1 ? process.argv[argPortIndex + 1] : process.env.PORT || 3000;
 
@@ -56,7 +56,51 @@ function hasBeenPlayedToday(songName, artistName) {
 }
 
 // --- Google Sheets Integration ---
+async function loadHistoryFromGoogleSheet() {
+    if (!SPREADSHEET_ID) {
+        console.log('SPREADSHEET_ID not found in .env, skipping loading history from Google Sheet.');
+        return;
+    }
+    try {
+        const auth = new google.auth.GoogleAuth({
+            keyFile: 'credentials.json',
+            scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+        });
+
+        const sheets = google.sheets({ version: 'v4', auth });
+
+        console.log('Attempting to load history from Google Sheet...');
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: 'Sheet1!A:D', // Read columns: Timestamp, Song, Artist, User
+        });
+
+        const rows = response.data.values;
+        // Start from row 1 to skip header
+        if (rows && rows.length > 1) {
+            songHistory = rows.slice(1).map(row => ({
+                name: row[1],
+                artist: row[2],
+                userName: row[3],
+            })).filter(s => s.name && s.artist); // Ensure song and artist exist
+
+            console.log(`Successfully loaded ${songHistory.length} songs from Google Sheet.`);
+        } else {
+            console.log('No data found in Google Sheet or sheet is empty.');
+        }
+    } catch (err) {
+        console.error('Error loading history from Google Sheet:', err.message);
+        if (err.message && err.message.includes('Unable to parse range')) {
+             console.error('Hint: Make sure your sheet is named "Sheet1" or change the range in the code.');
+        }
+    }
+}
+
 async function updateGoogleSheet(song) {
+    if (!SPREADSHEET_ID) {
+        console.log('SPREADSHEET_ID not found, skipping update to Google Sheet.');
+        return;
+    }
     try {
         const auth = new google.auth.GoogleAuth({
             keyFile: 'credentials.json', // Path to your service account key
@@ -75,14 +119,13 @@ async function updateGoogleSheet(song) {
             ]],
         };
 
-        const response = await sheets.spreadsheets.values.append({
+        await sheets.spreadsheets.values.append({
             spreadsheetId: SPREADSHEET_ID,
             range: 'Sheet1!A1', // Target the first cell of "Sheet1"
             valueInputOption: 'USER_ENTERED',
             resource,
         });
 
-        console.log('Appended to Google Sheet:', response.data);
     } catch (err) {
         console.error('Error updating Google Sheet:', err);
     }
@@ -130,7 +173,7 @@ app.get('/api/stats', (req, res) => {
 
     // Count song and artist occurrences
     const songCounts = getCounts(songHistory, song => `${song.name} - ${song.artist}`);
-    const artistCounts = getCounts(songHistory.flatMap(s => s.artist.split(', ')), artist => artist);
+    const artistCounts = getCounts(songHistory.flatMap(s => s.artist.split(', ').map(a => a.trim())), artist => artist);
 
     // Helper to format for the frontend
     const formatForResponse = (counts) => {
@@ -300,7 +343,7 @@ io.on('connection', (socket) => {
             playedToday.push(playedSong);
             console.log(`Logged played song to memory: ${playedSong.name}`);
 
-            // *** NEW: Update Google Sheet ***
+            // Update Google Sheet
             updateGoogleSheet(playedSong);
 
             // Remove from queue
@@ -316,9 +359,12 @@ io.on('connection', (socket) => {
 
 
 // --- Server Startup ---
-server.listen(PORT, () => {
-    console.log(`Server is listening on port ${PORT}`);
-    console.log(`Open http://localhost:${PORT} in your browser.`);
-    getSpotifyToken();
-    scheduleDailyReset(); // Start the daily timer
-});
+(async () => {
+    await loadHistoryFromGoogleSheet();
+    server.listen(PORT, () => {
+        console.log(`Server is listening on port ${PORT}`);
+        console.log(`Open http://localhost:${PORT} in your browser.`);
+        getSpotifyToken();
+        scheduleDailyReset(); // Start the daily timer
+    });
+})();
