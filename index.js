@@ -8,9 +8,7 @@ const { Server } = require("socket.io");
 const line = require('@line/bot-sdk');
 const { v4: uuidv4 } = require('uuid');
 const SpotifyWebApi = require('spotify-web-api-node');
-const { GoogleSpreadsheet } = require('google-spreadsheet');
-const { JWT } = require('google-auth-library');
-const creds = require('./credentials.json'); // Import credentials directly
+const sqlite3 = require('sqlite3').verbose();
 
 // --- Configuration ---
 const lineConfig = {
@@ -23,9 +21,35 @@ const spotifyApi = new SpotifyWebApi({
     clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
 });
 
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const argPortIndex = process.argv.indexOf('--port');
 const PORT = argPortIndex !== -1 ? process.argv[argPortIndex + 1] : process.env.PORT || 3000;
+
+// --- Database Initialization ---
+const db = new sqlite3.Database('./song_history.db', (err) => {
+    if (err) {
+        console.error('Error opening database', err.message);
+    } else {
+        console.log('Connected to the SQLite database.');
+        // Table for all played songs
+        db.run(`CREATE TABLE IF NOT EXISTS song_history (
+            id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            name TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            userName TEXT NOT NULL
+        )`);
+        // Table for songs currently in the queue
+        db.run(`CREATE TABLE IF NOT EXISTS pending_songs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            albumArt TEXT,
+            wasPlayedToday BOOLEAN,
+            userName TEXT NOT NULL
+        )`);
+    }
+});
+
 
 // --- Application State (In-Memory) ---
 let songQueue = [];
@@ -50,78 +74,66 @@ function hasBeenPlayedToday(songName, artistName) {
     return playedToday.some(song => song.name === songName && song.artist === artistName);
 }
 
-// --- Google Sheets Integration (using google-spreadsheet v4) ---
+// --- Database Functions ---
 
-// Initialize auth - see https://theoephraim.github.io/node-google-spreadsheet/#/guides/authentication
-const serviceAccountAuth = new JWT({
-  email: creds.client_email,
-  key: creds.private_key,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
-
-const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
-
-async function initializeSheet() {
-    if (!SPREADSHEET_ID) {
-        console.log('SPREADSHEET_ID not found in .env, skipping Google Sheet initialization.');
-        return;
-    }
-    try {
-        await doc.loadInfo(); // loads document properties and worksheets
-        console.log(`Connected to Google Sheet: "${doc.title}"`);
-    } catch (err) {
-        console.error('Error initializing Google Sheet:', err.message);
-    }
-}
-
-async function loadHistoryFromGoogleSheet() {
-    if (!doc.title) {
-        console.log('Skipping history loading due to sheet initialization failure.');
-        return;
-    }
-    try {
-        const sheet = doc.sheetsByIndex[0];
-        if (!sheet) {
-            console.log('Sheet1 not found in the document.');
-            return;
-        }
-        console.log('Attempting to load history from Google Sheet...');
-        const rows = await sheet.getRows();
-
-        songHistory = rows.map(row => ({
-            name: row.get('Song'),
-            artist: row.get('Artist'),
-            userName: row.get('User'),
-        })).filter(s => s.name && s.artist);
-
-        console.log(`Successfully loaded ${songHistory.length} songs from Google Sheet.`);
-
-    } catch (err) {
-        console.error('Error loading history from Google Sheet:', err.message);
-    }
-}
-
-async function updateGoogleSheet(song) {
-    if (!doc.title) {
-        console.log('Skipping sheet update due to initialization failure.');
-        return;
-    }
-    try {
-        const sheet = doc.sheetsByIndex[0];
-        if (!sheet) {
-            console.log('Sheet1 not found for updating.');
-            return;
-        }
-        await sheet.addRow({
-            Timestamp: new Date().toISOString(),
-            Song: song.name,
-            Artist: song.artist,
-            User: song.userName,
+// Load complete song history from DB
+async function loadHistoryFromDb() {
+    return new Promise((resolve, reject) => {
+        db.all("SELECT name, artist, userName FROM song_history ORDER BY timestamp ASC", [], (err, rows) => {
+            if (err) {
+                console.error('Error loading history from database:', err.message);
+                return reject(err);
+            }
+            songHistory = rows.map(row => ({ name: row.name, artist: row.artist, userName: row.userName }));
+            console.log(`Successfully loaded ${songHistory.length} songs from the database history.`);
+            resolve();
         });
+    });
+}
 
-    } catch (err) {
-        console.error('Error updating Google Sheet:', err);
-    }
+// Load pending songs (the queue) from DB
+async function loadPendingSongsFromDb() {
+    return new Promise((resolve, reject) => {
+        db.all("SELECT * FROM pending_songs", [], (err, rows) => {
+            if (err) {
+                console.error('Error loading pending songs from database:', err.message);
+                return reject(err);
+            }
+            // Ensure wasPlayedToday is a boolean
+            songQueue = rows.map(row => ({ ...row, wasPlayedToday: !!row.wasPlayedToday }));
+            console.log(`Successfully loaded ${songQueue.length} pending songs into the queue.`);
+            resolve();
+        });
+    });
+}
+
+// Add a song to the history table
+async function addSongToHistoryDb(song) {
+     db.run(`INSERT INTO song_history (id, timestamp, name, artist, userName) VALUES (?, ?, ?, ?, ?)`,
+        [song.id, new Date().toISOString(), song.name, song.artist, song.userName],
+        (err) => {
+            if (err) console.error('Error updating database history:', err.message);
+            else console.log(`Added ${song.name} to database history.`);
+     });
+}
+
+// Add a song to the pending queue table
+async function addSongToPendingDb(song) {
+    db.run(`INSERT INTO pending_songs (id, name, artist, albumArt, wasPlayedToday, userName) VALUES (?, ?, ?, ?, ?, ?)`,
+        [song.id, song.name, song.artist, song.albumArt, song.wasPlayedToday, song.userName],
+        (err) => {
+            if (err) console.error('Error adding song to pending DB:', err.message);
+            else console.log(`Added ${song.name} to pending database.`);
+        }
+    );
+}
+
+// Remove a song from the pending queue table
+async function removeSongFromPendingDb(songId) {
+    db.run(`DELETE FROM pending_songs WHERE id = ?`, [songId], (err) => {
+        if (err) console.error('Error removing song from pending DB:', err.message);
+        else console.log(`Removed song ${songId} from pending database.`);
+    });
 }
 
 
@@ -140,9 +152,7 @@ function getSpotifyToken() {
             spotifyApi.setAccessToken(data.body['access_token']);
             setTimeout(getSpotifyToken, (data.body['expires_in'] - 60) * 1000);
         },
-        (err) => {
-            console.error('Something went wrong when retrieving a Spotify access token', err);
-        }
+        (err) => console.error('Something went wrong when retrieving a Spotify access token', err)
     );
 }
 
@@ -152,30 +162,22 @@ app.get('/stats', (req, res) => {
     res.sendFile(__dirname + '/public/stats.html');
 });
 
-// In-memory stats API
 app.get('/api/stats', (req, res) => {
-    const getCounts = (arr, keyExtractor) => {
-        return arr.reduce((acc, item) => {
-            const key = keyExtractor(item);
-            acc[key] = (acc[key] || 0) + 1;
-            return acc;
-        }, {});
-    };
+    const getCounts = (arr, keyExtractor) => arr.reduce((acc, item) => {
+        const key = keyExtractor(item);
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+    }, {});
 
     const songCounts = getCounts(songHistory, song => `${song.name} - ${song.artist}`);
     const artistCounts = getCounts(songHistory.flatMap(s => s.artist.split(', ').map(a => a.trim())), artist => artist);
 
-    const formatForResponse = (counts) => {
-        return Object.entries(counts)
-            .map(([name, count]) => ({ name, count }))
-            .sort((a, b) => b.count - a.count)
-            .slice(0, 20);
-    };
+    const formatForResponse = (counts) => Object.entries(counts)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20);
 
-    res.json({
-        songs: formatForResponse(songCounts),
-        artists: formatForResponse(artistCounts),
-    });
+    res.json({ songs: formatForResponse(songCounts), artists: formatForResponse(artistCounts) });
 });
 
 
@@ -209,8 +211,7 @@ async function handleEvent(event) {
 
             const isDuplicateInQueue = songQueue.some(song => song.name === songData.name && song.artist === songData.artist);
             if (isDuplicateInQueue) {
-                const replyText = `\"${songData.name}\" is already in the queue.`;
-                return lineClient.replyMessage(event.replyToken, { type: 'text', text: replyText });
+                return lineClient.replyMessage(event.replyToken, { type: 'text', text: `"${songData.name}" is already in the queue.` });
             }
 
             const newSong = {
@@ -223,10 +224,11 @@ async function handleEvent(event) {
             };
 
             songQueue.push(newSong);
+            addSongToPendingDb(newSong); // <-- Add to pending DB
             console.log(`Added to queue: ${newSong.name} by ${newSong.userName}`);
             io.emit('update_queue', songQueue);
 
-            const replyText = `\"${newSong.name}\" by ${newSong.artist} has been added to the queue!`;
+            const replyText = `"${newSong.name}" by ${newSong.artist} has been added to the queue!`;
             return lineClient.replyMessage(event.replyToken, { type: 'text', text: replyText });
 
         } catch (err) {
@@ -250,7 +252,7 @@ async function handleEvent(event) {
     try {
         const searchResult = await spotifyApi.searchTracks(query, { limit: 1 });
         if (searchResult.body.tracks.items.length === 0) {
-            return lineClient.replyMessage(event.replyToken, { type: 'text', text: `Sorry, I couldn\'t find "${query}".` });
+            return lineClient.replyMessage(event.replyToken, { type: 'text', text: `Sorry, I couldn't find "${query}".` });
         }
 
         const track = searchResult.body.tracks.items[0];
@@ -312,6 +314,7 @@ io.on('connection', (socket) => {
 
     socket.on('delete_song', (songId) => {
         songQueue = songQueue.filter(song => song.id !== songId);
+        removeSongFromPendingDb(songId); // <-- Remove from pending DB
         console.log(`Removed song with ID: ${songId}`);
         io.emit('update_queue', songQueue);
     });
@@ -323,7 +326,8 @@ io.on('connection', (socket) => {
             playedToday.push(playedSong);
             console.log(`Logged played song to memory: ${playedSong.name}`);
 
-            updateGoogleSheet(playedSong);
+            addSongToHistoryDb(playedSong); // <-- Add to history DB
+            removeSongFromPendingDb(songId); // <-- Remove from pending DB
 
             songQueue = songQueue.filter(song => song.id !== songId);
             io.emit('update_queue', songQueue);
@@ -338,8 +342,8 @@ io.on('connection', (socket) => {
 
 // --- Server Startup ---
 (async () => {
-    await initializeSheet();
-    await loadHistoryFromGoogleSheet();
+    await loadHistoryFromDb();
+    await loadPendingSongsFromDb(); // <-- Load queue from DB
     server.listen(PORT, () => {
         console.log(`Server is listening on port ${PORT}`);
         console.log(`Open http://localhost:${PORT} in your browser.`);
