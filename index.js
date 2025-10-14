@@ -8,7 +8,17 @@ const { Server } = require("socket.io");
 const line = require('@line/bot-sdk');
 const { v4: uuidv4 } = require('uuid');
 const SpotifyWebApi = require('spotify-web-api-node');
-const sqlite3 = require('sqlite3').verbose();
+
+// --- Firebase Initialization ---
+const admin = require('firebase-admin');
+const serviceAccount = require('./service-account-key.json'); 
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+const db = admin.firestore();
+
 
 // --- Configuration ---
 const lineConfig = {
@@ -23,33 +33,6 @@ const spotifyApi = new SpotifyWebApi({
 
 const argPortIndex = process.argv.indexOf('--port');
 const PORT = argPortIndex !== -1 ? process.argv[argPortIndex + 1] : process.env.PORT || 3000;
-
-// --- Database Initialization ---
-const db = new sqlite3.Database('./song_history.db', (err) => {
-    if (err) {
-        console.error('Error opening database', err.message);
-    } else {
-        console.log('Connected to the SQLite database.');
-        // Table for all played songs
-        db.run(`CREATE TABLE IF NOT EXISTS song_history (
-            id TEXT PRIMARY KEY,
-            timestamp TEXT NOT NULL,
-            name TEXT NOT NULL,
-            artist TEXT NOT NULL,
-            userName TEXT NOT NULL
-        )`);
-        // Table for songs currently in the queue
-        db.run(`CREATE TABLE IF NOT EXISTS pending_songs (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            artist TEXT NOT NULL,
-            albumArt TEXT,
-            wasPlayedToday BOOLEAN,
-            userName TEXT NOT NULL
-        )`);
-    }
-});
-
 
 // --- Application State (In-Memory) ---
 let songQueue = [];
@@ -74,66 +57,74 @@ function hasBeenPlayedToday(songName, artistName) {
     return playedToday.some(song => song.name === songName && song.artist === artistName);
 }
 
-// --- Database Functions ---
 
-// Load complete song history from DB
-async function loadHistoryFromDb() {
-    return new Promise((resolve, reject) => {
-        db.all("SELECT name, artist, userName FROM song_history ORDER BY timestamp ASC", [], (err, rows) => {
-            if (err) {
-                console.error('Error loading history from database:', err.message);
-                return reject(err);
-            }
-            songHistory = rows.map(row => ({ name: row.name, artist: row.artist, userName: row.userName }));
-            console.log(`Successfully loaded ${songHistory.length} songs from the database history.`);
-            resolve();
+// --- Firestore Functions ---
+
+// Load data from Firestore on startup
+async function loadDataFromFirestore() {
+    try {
+        // Load Pending Songs (Queue)
+        const pendingSnapshot = await db.collection('pending_songs').orderBy('timestamp', 'asc').get();
+        songQueue = pendingSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        console.log(`Successfully loaded ${songQueue.length} pending songs into the queue.`);
+
+        // Load Song History
+        const historySnapshot = await db.collection('song_history').orderBy('timestamp', 'asc').get();
+        songHistory = historySnapshot.docs.map(doc => doc.data());
+        console.log(`Successfully loaded ${songHistory.length} songs from the database history.`);
+
+    } catch (error) {
+        console.error("Error loading data from Firestore:", error);
+    }
+}
+
+
+// Add a song to the pending queue in Firestore
+async function addSongToQueue(song) {
+    try {
+        await db.collection('pending_songs').doc(song.id).set({
+            ...song,
+            timestamp: admin.firestore.FieldValue.serverTimestamp() // Add a timestamp
         });
-    });
+        console.log(`Added ${song.name} to Firestore pending_songs.`);
+    } catch (error) {
+        console.error('Error adding song to pending Firestore:', error);
+    }
 }
 
-// Load pending songs (the queue) from DB
-async function loadPendingSongsFromDb() {
-    return new Promise((resolve, reject) => {
-        db.all("SELECT * FROM pending_songs", [], (err, rows) => {
-            if (err) {
-                console.error('Error loading pending songs from database:', err.message);
-                return reject(err);
-            }
-            // Ensure wasPlayedToday is a boolean
-            songQueue = rows.map(row => ({ ...row, wasPlayedToday: !!row.wasPlayedToday }));
-            console.log(`Successfully loaded ${songQueue.length} pending songs into the queue.`);
-            resolve();
+// Remove a song from the pending queue in Firestore
+async function removeSongFromQueue(songId) {
+    try {
+        await db.collection('pending_songs').doc(songId).delete();
+        console.log(`Removed song ${songId} from Firestore pending_songs.`);
+    } catch (error) {
+        console.error('Error removing song from pending Firestore:', error);
+    }
+}
+
+// Move a song from pending to history in Firestore
+async function moveSongToHistory(song) {
+    try {
+        // A transaction ensures this is an all-or-nothing operation
+        const batch = db.batch();
+
+        // 1. Set the song in the history collection
+        const historyRef = db.collection('song_history').doc(song.id);
+        batch.set(historyRef, {
+             ...song,
+             playedAt: admin.firestore.FieldValue.serverTimestamp() // Mark played time
         });
-    });
-}
 
-// Add a song to the history table
-async function addSongToHistoryDb(song) {
-     db.run(`INSERT INTO song_history (id, timestamp, name, artist, userName) VALUES (?, ?, ?, ?, ?)`,
-        [song.id, new Date().toISOString(), song.name, song.artist, song.userName],
-        (err) => {
-            if (err) console.error('Error updating database history:', err.message);
-            else console.log(`Added ${song.name} to database history.`);
-     });
-}
+        // 2. Delete the song from the pending collection
+        const pendingRef = db.collection('pending_songs').doc(song.id);
+        batch.delete(pendingRef);
 
-// Add a song to the pending queue table
-async function addSongToPendingDb(song) {
-    db.run(`INSERT INTO pending_songs (id, name, artist, albumArt, wasPlayedToday, userName) VALUES (?, ?, ?, ?, ?, ?)`,
-        [song.id, song.name, song.artist, song.albumArt, song.wasPlayedToday, song.userName],
-        (err) => {
-            if (err) console.error('Error adding song to pending DB:', err.message);
-            else console.log(`Added ${song.name} to pending database.`);
-        }
-    );
-}
+        await batch.commit();
+        console.log(`Moved ${song.name} from pending to history in Firestore.`);
 
-// Remove a song from the pending queue table
-async function removeSongFromPendingDb(songId) {
-    db.run(`DELETE FROM pending_songs WHERE id = ?`, [songId], (err) => {
-        if (err) console.error('Error removing song from pending DB:', err.message);
-        else console.log(`Removed song ${songId} from pending database.`);
-    });
+    } catch (error) {
+        console.error('Error moving song to history:', error);
+    }
 }
 
 
@@ -224,7 +215,7 @@ async function handleEvent(event) {
             };
 
             songQueue.push(newSong);
-            addSongToPendingDb(newSong); // <-- Add to pending DB
+            await addSongToQueue(newSong); // <-- Use new Firestore function
             console.log(`Added to queue: ${newSong.name} by ${newSong.userName}`);
             io.emit('update_queue', songQueue);
 
@@ -312,22 +303,21 @@ io.on('connection', (socket) => {
     console.log('A user connected to the display.');
     socket.emit('update_queue', songQueue);
 
-    socket.on('delete_song', (songId) => {
+    socket.on('delete_song', async (songId) => {
         songQueue = songQueue.filter(song => song.id !== songId);
-        removeSongFromPendingDb(songId); // <-- Remove from pending DB
+        await removeSongFromQueue(songId); // <-- Use new Firestore function
         console.log(`Removed song with ID: ${songId}`);
         io.emit('update_queue', songQueue);
     });
 
-    socket.on('song_played', (songId) => {
+    socket.on('song_played', async (songId) => {
         const playedSong = songQueue.find(song => song.id === songId);
         if (playedSong) {
             songHistory.push(playedSong);
             playedToday.push(playedSong);
             console.log(`Logged played song to memory: ${playedSong.name}`);
 
-            addSongToHistoryDb(playedSong); // <-- Add to history DB
-            removeSongFromPendingDb(songId); // <-- Remove from pending DB
+            await moveSongToHistory(playedSong); // <-- Use new Firestore function
 
             songQueue = songQueue.filter(song => song.id !== songId);
             io.emit('update_queue', songQueue);
@@ -342,8 +332,7 @@ io.on('connection', (socket) => {
 
 // --- Server Startup ---
 (async () => {
-    await loadHistoryFromDb();
-    await loadPendingSongsFromDb(); // <-- Load queue from DB
+    await loadDataFromFirestore(); // <-- Load queue from Firestore
     server.listen(PORT, () => {
         console.log(`Server is listening on port ${PORT}`);
         console.log(`Open http://localhost:${PORT} in your browser.`);
